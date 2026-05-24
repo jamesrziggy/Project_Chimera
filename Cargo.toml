@@ -7,6 +7,18 @@ edition = "2024"
 name = "test_math"
 path = "test_math.rs"
 
+[[bin]]
+name = "test_rag"
+path = "test_rag.rs"
+
+[[bin]]
+name = "bench_perf"
+path = "bench_perf.rs"
+
+[[bin]]
+name = "test_torrent"
+path = "test_torrent.rs"
+
 [lib]
 name = "kona_rs"
 path = "lib.rs"

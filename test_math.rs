@@ -2,6 +2,9 @@ mod k;
 mod parallel;
 mod primitives;
 mod va;
+mod rag;
+mod ffi;
+
 
 use k::K;
 
@@ -71,4 +74,68 @@ fn main() {
     let masked = va::triu(&mat, 0); // Upper triangle
     println!("triu(3x3):");
     println!("{:?}", masked);
+
+    // Test grade_up / grade_down
+    let vals_i = K::from_ints(vec![30, 10, 20]);
+    println!("grade_up([30,10,20]) = {:?}", va::grade_up(&vals_i));
+    println!("grade_down([30,10,20]) = {:?}", va::grade_down(&vals_i));
+
+    let vals_f = K::from_floats(vec![f64::NAN, 30.0, f64::INFINITY, 10.0, f64::NEG_INFINITY, 20.0, f64::NAN]);
+    println!("grade_up with NaNs/Infs = {:?}", va::grade_up(&vals_f));
+    println!("grade_down with NaNs/Infs = {:?}", va::grade_down(&vals_f));
+
+    // Test take
+    let x = K::from_ints(vec![10, 20, 30]);
+    println!("take(5, [10,20,30]) = {:?}", va::take(&K::ki(5), &x));
+    println!("take(-5, [10,20,30]) = {:?}", va::take(&K::ki(-5), &x));
+    println!("take(2, [10,20,30]) = {:?}", va::take(&K::ki(2), &x));
+    println!("take(-2, [10,20,30]) = {:?}", va::take(&K::ki(-2), &x));
+
+    // Test first, reverse, flip
+    let arr = K::from_ints(vec![10, 20, 30]);
+    println!("first([10,20,30]) = {:?}", va::first(&arr));
+    println!("reverse([10,20,30]) = {:?}", va::reverse(&arr));
+    let mat_ints = K::from_list(vec![
+        K::from_ints(vec![1, 2, 3]),
+        K::from_ints(vec![4, 5, 6]),
+    ]);
+    println!("flip([[1,2,3],[4,5,6]]) = {:?}", va::flip(&mat_ints));
+
+    // Test unique
+    let dup_ints = K::from_ints(vec![1, 2, 2, 3, 1, 4, 3]);
+    println!("unique([1,2,2,3,1,4,3]) = {:?}", va::unique(&dup_ints));
+    let dup_floats = K::from_floats(vec![1.5, 2.5, 2.5, f64::NAN, 3.5, 1.5, f64::NAN]);
+    println!("unique([1.5,2.5,2.5,NaN,3.5,1.5,NaN]) = {:?}", va::unique(&dup_floats));
+    let dup_list = K::from_list(vec![
+        K::from_ints(vec![1, 2]),
+        K::from_ints(vec![3, 4]),
+        K::from_ints(vec![1, 2]),
+        K::from_ints(vec![5]),
+    ]);
+    println!("unique([[1,2],[3,4],[1,2],[5]]) = {:?}", va::unique(&dup_list));
+    println!("unique(atom 42) = {:?}", va::unique(&K::ki(42)));
+
+    // Test FFI primitives
+    let fno_sin = K::ki(101);
+    let proj_sin = va::_2m(&fno_sin);
+    println!("FFI projection monadic 2: 101 = {:?}", proj_sin);
+    let ffi_res = va::_2d(&proj_sin, &K::kf(0.0));
+    println!("FFI call dyadic _2d (sin 0.0) = {:?}", ffi_res);
+    let ffi_res_arr = va::_2d(&fno_sin, &K::from_floats(vec![0.0, 1.5707963267948966]));
+    println!("FFI call dyadic _2d (sin [0, pi/2]) = {:?}", ffi_res_arr);
+
+    // Test RAG Retrieval
+    use rag::{Document, RetrievalPipeline};
+    let docs = vec![
+        Document { id: 1, content: "Rust is a systems programming language".to_string() },
+        Document { id: 2, content: "Kona is an interpreter for the K programming language".to_string() },
+        Document { id: 3, content: "Retrieve relevant context for RAG pipelines".to_string() },
+    ];
+    let pipeline = RetrievalPipeline::new(docs);
+    let results = pipeline.retrieve("K interpreter language", 2);
+    println!("RAG Retrieve results for 'K interpreter language':");
+    for (doc, score) in results {
+        println!("  Doc {}: '{}' (Score: {:.4})", doc.id, doc.content, score);
+    }
 }
+

@@ -94,10 +94,10 @@ fn scalar_init(a: &K, b: &K) -> ScalarInit {
     }
 
     // Int op Int promotion (K3 heuristic for safety)
-    if zt.abs() == 1 {
-        // Promote to float (2/-2)
-        zt = if zt < 0 { -2 } else { 2 };
-    }
+    // if zt.abs() == 1 {
+    //     // Promote to float (2/-2)
+    //     zt = if zt < 0 { -2 } else { 2 };
+    // }
 
     assert!(zt.abs() <= 2, "type error produced invalid type");
 
@@ -341,120 +341,32 @@ pub fn dot(a: &K, b: &K) -> K {
     let abs_a = s.at.abs();
     let abs_b = s.bt.abs();
 
-    // Integer and float accumulators — exactly like the C code
-    let mut acc_i: i64 = 0;
-    let mut acc_f: f64 = 0.0;
-
-    // ---------------------------------------------------------------
-    // SCALAR_EXPR_CASE — differs from SCALAR_OP_CASE in that it
-    // accumulates into a scalar instead of writing to an output array.
-    //
-    // C pattern:
-    //   SCALAR_EXPR_CASE(DOT_F, F, kF(a), kF(b), x, y)
-    // expands to (approximately):
-    //   if(an==bn)     DO(zn, x=kF(a)[i]; y=kF(b)[i]; accF+=x*y)
-    //   else if(an==1) DO(zn, x=kF(a)[0]; y=kF(b)[i]; accF+=x*y)
-    //   else           DO(zn, x=kF(a)[i]; y=kF(b)[0]; accF+=x*y)
-    // ---------------------------------------------------------------
-
     if abs_a == 2 && abs_b == 2 {
-        // float × float → float accumulator
-        // DOT_F: accF += x * y
         let af = a.kf_data();
         let bf = b.kf_data();
         let n = s.zn as usize;
-
-        if s.an == s.bn {
-            for i in 0..n {
-                acc_f += af[i] * bf[i]; // DOT_F
-            }
-        } else if s.an == 1 {
-            let a0 = af[0];
-            for i in 0..n {
-                acc_f += a0 * bf[i]; // DOT_F
-            }
-        } else {
-            let b0 = bf[0];
-            for i in 0..n {
-                acc_f += af[i] * b0; // DOT_F
-            }
-        }
+        let acc_f = dot_ff_parallel(af, bf, s.an, s.bn, n);
         K::kf(acc_f)
     } else if abs_a == 2 && abs_b == 1 {
-        // float × int → float accumulator
-        // DOT_FI: accF += x * I2F(y)
         let af = a.kf_data();
         let bi = b.ki_data();
         let n = s.zn as usize;
-
-        if s.an == s.bn {
-            for i in 0..n {
-                acc_f += af[i] * K::i2f(bi[i]); // DOT_FI
-            }
-        } else if s.an == 1 {
-            let a0 = af[0];
-            for i in 0..n {
-                acc_f += a0 * K::i2f(bi[i]); // DOT_FI
-            }
-        } else {
-            let b0 = K::i2f(bi[0]);
-            for i in 0..n {
-                acc_f += af[i] * b0; // DOT_FI
-            }
-        }
+        let acc_f = dot_fi_parallel(af, bi, s.an, s.bn, n);
         K::kf(acc_f)
     } else if abs_a == 1 && abs_b == 2 {
-        // int × float → float accumulator
-        // DOT_IF: accF += I2F(x) * y
         let ai = a.ki_data();
         let bf = b.kf_data();
         let n = s.zn as usize;
-
-        if s.an == s.bn {
-            for i in 0..n {
-                acc_f += K::i2f(ai[i]) * bf[i]; // DOT_IF
-            }
-        } else if s.an == 1 {
-            let a0 = K::i2f(ai[0]);
-            for i in 0..n {
-                acc_f += a0 * bf[i]; // DOT_IF
-            }
-        } else {
-            let b0 = bf[0];
-            for i in 0..n {
-                acc_f += K::i2f(ai[i]) * b0; // DOT_IF
-            }
-        }
+        let acc_f = dot_if_parallel(ai, bf, s.an, s.bn, n);
         K::kf(acc_f)
     } else if abs_a == 1 && abs_b == 1 {
-        // int × int → int accumulator
-        // DOT_I: accI += x * y
         let ai = a.ki_data();
         let bi = b.ki_data();
         let n = s.zn as usize;
-
-        if s.an == s.bn {
-            for i in 0..n {
-                acc_i += ai[i] * bi[i]; // DOT_I
-            }
-        } else if s.an == 1 {
-            let a0 = ai[0];
-            for i in 0..n {
-                acc_i += a0 * bi[i]; // DOT_I
-            }
-        } else {
-            let b0 = bi[0];
-            for i in 0..n {
-                acc_i += ai[i] * b0; // DOT_I
-            }
-        }
+        let acc_i = dot_ii_parallel(ai, bi, s.an, s.bn, n);
         K::ki(acc_i)
     } else if abs_a == 0 || abs_b == 0 {
-        // General list fallback:
-        //   C: y = overDyad(0, p+2, (x = times(a,b)));
-        //   This is: +/ times(a,b) — multiply then sum
         let product = times(a, b);
-        // Sum the product array (overDyad with plus)
         match &product.data {
             KData::Ints(v) => K::ki(v.iter().sum()),
             KData::Floats(v) => K::kf(v.iter().sum()),
@@ -895,6 +807,17 @@ pub fn matmul(a: &K, b: &K) -> K {
     }
     let n = b_rows[0].n as usize; // Columns in B
 
+    for (idx, row) in a_rows.iter().enumerate() {
+        if row.n as usize != k {
+            panic!("matmul: row {} in matrix A has invalid length {} (expected {})", idx, row.n, k);
+        }
+    }
+    for (idx, row) in b_rows.iter().enumerate() {
+        if row.n as usize != n {
+            panic!("matmul: row {} in matrix B has invalid length {} (expected {})", idx, row.n, n);
+        }
+    }
+
     if k != b_k {
         panic!(
             "matmul: dimension mismatch: A[{}, {}] x B[{}, {}]",
@@ -902,54 +825,55 @@ pub fn matmul(a: &K, b: &K) -> K {
         );
     }
 
-    // Naive MatMul: C[i][j] = sum(A[i][k] * B[k][j])
-    // This is slow (O(MLN) with bad locality).
-    // Better: Transpose B first? Or just iterate.
-    // Given we are in Rust, let's just do the naive loops for MVP.
-    // Optimization: Blocked loop later.
-
-    // Provide B as columns for faster access?
-    // Actually, accessing B[k][j] repeatedly is bad.
-    // Let's transpose B into B_cols: Vec<Vec<f64>>.
-    // B is [K rows of N floats].
-    // B_cols should be [N columns of K floats].
-    let mut b_cols = vec![Vec::with_capacity(k); n];
+    // Transpose B into a contiguous 1D flat array (size N * K)
+    // b_transposed[j * k + x] corresponds to B[x][j]
+    let mut b_transposed = vec![0.0; n * k];
     for r in 0..k {
-        let row = b_rows[r].kf_data(); // Assume float matrix for NN
+        let row = b_rows[r].kf_data();
         for c in 0..n {
-            b_cols[c].push(row[c]);
+            b_transposed[c * k + r] = row[c];
         }
     }
-
-    // Parallel MatMul using std::thread::scope (No external deps!)
-    // C[i] = A[i] . B_cols
 
     // Determine # threads
     let num_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
-    let chunk_size = (m + num_threads - 1) / num_threads;
+    
+    // Check if total operations are small, run sequentially if so
+    if m * n * k < 16_384 || m < 2 {
+        let mut final_rows = Vec::with_capacity(m);
+        for row_k in a_rows {
+            let row_a = &row_k.kf_data()[..k];
+            let mut row_c = Vec::with_capacity(n);
+            for j in 0..n {
+                let offset = j * k;
+                let col_b = &b_transposed[offset..offset + k];
+                let sum: f64 = row_a.iter().zip(col_b.iter()).map(|(&x, &y)| x * y).sum();
+                row_c.push(sum);
+            }
+            final_rows.push(K::from_floats(row_c));
+        }
+        return K::from_list(final_rows);
+    }
 
-    // Pre-allocate result vector with placeholders (unsafe or Option?)
-    // Safe way: collect from threads.
+    let chunk_size = (m + num_threads - 1) / num_threads;
 
     let c_rows = std::thread::scope(|s| {
         let mut handles = Vec::with_capacity(num_threads);
 
         for chunk in a_rows.chunks(chunk_size) {
-            let b_cols_ref = &b_cols; // Shared ref
+            let b_transposed_ref = &b_transposed;
 
             handles.push(s.spawn(move || {
                 let mut chunk_results = Vec::with_capacity(chunk.len());
                 for row_k in chunk {
-                    let row_a = row_k.kf_data();
+                    let row_a = &row_k.kf_data()[..k];
                     let mut row_c = Vec::with_capacity(n);
                     for j in 0..n {
-                        let col_b = &b_cols_ref[j];
-                        let mut sum = 0.0;
-                        for x in 0..k {
-                            sum += row_a[x] * col_b[x];
-                        }
+                        let offset = j * k;
+                        let col_b = &b_transposed_ref[offset..offset + k];
+                        let sum: f64 = row_a.iter().zip(col_b.iter()).map(|(&x, &y)| x * y).sum();
                         row_c.push(sum);
                     }
                     chunk_results.push(K::from_floats(row_c));
@@ -979,37 +903,92 @@ pub fn transpose(x: &K) -> K {
     if m == 0 {
         return K::from_list(vec![]);
     }
-    let n = rows[0].n as usize;
-
-    let mut cols = vec![Vec::with_capacity(m); n];
-
-    for i in 0..m {
-        if let KData::Floats(row) = &rows[i].data {
-            for j in 0..n {
-                cols[j].push(row[j]);
+    
+    let first_row = &rows[0];
+    let n = first_row.n as usize;
+    
+    match &first_row.data {
+        KData::Ints(_) => {
+            let mut cols = vec![Vec::with_capacity(m); n];
+            for i in 0..m {
+                match &rows[i].data {
+                    KData::Ints(row) => {
+                        if row.len() != n {
+                            panic!("length error: rows must have equal length");
+                        }
+                        for j in 0..n {
+                            cols[j].push(row[j]);
+                        }
+                    }
+                    _ => panic!("type error: expected integer matrix"),
+                }
             }
-        } else {
-            panic!("transpose: expected float matrix");
+            let mut new_rows = Vec::with_capacity(n);
+            for col in cols {
+                new_rows.push(K::from_ints(col));
+            }
+            K::from_list(new_rows)
+        }
+        KData::Floats(_) => {
+            let mut cols = vec![Vec::with_capacity(m); n];
+            for i in 0..m {
+                match &rows[i].data {
+                    KData::Floats(row) => {
+                        if row.len() != n {
+                            panic!("length error: rows must have equal length");
+                        }
+                        for j in 0..n {
+                            cols[j].push(row[j]);
+                        }
+                    }
+                    _ => panic!("type error: expected float matrix"),
+                }
+            }
+            let mut new_rows = Vec::with_capacity(n);
+            for col in cols {
+                new_rows.push(K::from_floats(col));
+            }
+            K::from_list(new_rows)
+        }
+        KData::List(_) => {
+            let mut cols = vec![Vec::with_capacity(m); n];
+            for i in 0..m {
+                match &rows[i].data {
+                    KData::List(row) => {
+                        if row.len() != n {
+                            panic!("length error: rows must have equal length");
+                        }
+                        for j in 0..n {
+                            cols[j].push(row[j].clone());
+                        }
+                    }
+                    _ => panic!("type error: expected list matrix"),
+                }
+            }
+            let mut new_rows = Vec::with_capacity(n);
+            for col in cols {
+                new_rows.push(K::from_list(col));
+            }
+            K::from_list(new_rows)
         }
     }
-
-    let mut new_rows = Vec::with_capacity(n);
-    for col in cols {
-        new_rows.push(K::from_floats(col));
-    }
-    K::from_list(new_rows)
 }
+
+#[allow(dead_code)]
+pub fn flip(x: &K) -> K {
+    transpose(x)
+}
+
 
 /// Sigmoid Activation: 1 / (1 + exp(-x))
 pub fn sigmoid(x: &K) -> K {
     match &x.data {
         KData::Floats(v) => {
-            let res: Vec<f64> = v.iter().map(|&val| 1.0 / (1.0 + (-val).exp())).collect();
+            let res = map_f64_parallel(v, |val| 1.0 / (1.0 + (-val).exp()));
             K::from_floats(res)
         }
         KData::List(rows) => {
-            let new_rows: Vec<K> = rows.iter().map(|row| sigmoid(row)).collect();
-            K::from_list(new_rows)
+            K::from_list(map_rows_parallel(rows, |row| sigmoid(row)))
         }
         _ => panic!("sigmoid: expected float array or matrix"),
     }
@@ -1019,12 +998,11 @@ pub fn sigmoid(x: &K) -> K {
 pub fn tanh(x: &K) -> K {
     match &x.data {
         KData::Floats(v) => {
-            let res: Vec<f64> = v.iter().map(|&val| val.tanh()).collect();
+            let res = map_f64_parallel(v, |val| val.tanh());
             K::from_floats(res)
         }
         KData::List(rows) => {
-            let new_rows: Vec<K> = rows.iter().map(|row| tanh(row)).collect();
-            K::from_list(new_rows)
+            K::from_list(map_rows_parallel(rows, |row| tanh(row)))
         }
         _ => panic!("tanh: expected float array or matrix"),
     }
@@ -1034,15 +1012,11 @@ pub fn tanh(x: &K) -> K {
 pub fn relu(x: &K) -> K {
     match &x.data {
         KData::Floats(v) => {
-            let res: Vec<f64> = v
-                .iter()
-                .map(|&val| if val > 0.0 { val } else { 0.0 })
-                .collect();
+            let res = map_f64_parallel(v, |val| if val > 0.0 { val } else { 0.0 });
             K::from_floats(res)
         }
         KData::List(rows) => {
-            let new_rows: Vec<K> = rows.iter().map(|row| relu(row)).collect();
-            K::from_list(new_rows)
+            K::from_list(map_rows_parallel(rows, |row| relu(row)))
         }
         _ => panic!("relu: expected float array or matrix"),
     }
@@ -1052,17 +1026,11 @@ pub fn relu(x: &K) -> K {
 pub fn softmax(x: &K) -> K {
     match &x.data {
         KData::Floats(v) => {
-            // Stability: subtract max
-            let max_val = v.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-            let exps: Vec<f64> = v.iter().map(|&val| (val - max_val).exp()).collect();
-            let sum: f64 = exps.iter().sum();
-            let res: Vec<f64> = exps.iter().map(|&val| val / sum).collect();
+            let res = softmax_floats_parallel(v);
             K::from_floats(res)
         }
         KData::List(rows) => {
-            // Apply softmax row-wise
-            let new_rows: Vec<K> = rows.iter().map(|row| softmax(row)).collect();
-            K::from_list(new_rows)
+            K::from_list(map_rows_parallel(rows, |row| softmax(row)))
         }
         _ => panic!("softmax: expected float array or list of arrays"),
     }
@@ -1079,8 +1047,11 @@ pub fn sum_cols(x: &K) -> K {
             let n = rows[0].n as usize;
             let mut sum = vec![0.0; n];
 
-            for row in rows {
+            for (idx, row) in rows.iter().enumerate() {
                 let rf = row.kf_data();
+                if rf.len() != n {
+                    panic!("sum_cols: row {} has invalid length {} (expected {})", idx, rf.len(), n);
+                }
                 for i in 0..n {
                     sum[i] += rf[i];
                 }
@@ -1096,15 +1067,11 @@ pub fn sum_cols(x: &K) -> K {
 pub fn relu_derivative(x: &K) -> K {
     match &x.data {
         KData::Floats(v) => {
-            let res: Vec<f64> = v
-                .iter()
-                .map(|&val| if val > 0.0 { 1.0 } else { 0.0 })
-                .collect();
+            let res = map_f64_parallel(v, |val| if val > 0.0 { 1.0 } else { 0.0 });
             K::from_floats(res)
         }
         KData::List(rows) => {
-            let new_rows: Vec<K> = rows.iter().map(|row| relu_derivative(row)).collect();
-            K::from_list(new_rows)
+            K::from_list(map_rows_parallel(rows, |row| relu_derivative(row)))
         }
         _ => panic!("relu_derivative: expected float/matrix"),
     }
@@ -1112,70 +1079,19 @@ pub fn relu_derivative(x: &K) -> K {
 
 /// Sigmoid Backward: sig(x) * (1 - sig(x)) * dy
 pub fn sigmoid_backward(x: &K, dy: &K) -> K {
-    // We compute sigmoid(x) first
     let s = sigmoid(x);
-    // (1 - s)
-    // We need 1.0 broadcasted or map.
-    // Let's do it manually element-wise for speed/simplicity
-
-    // We need to iterate s and dy in parallel (Hadamard 3-way)
-    // This is specialized.
-    // TODO: implement generalized 'map3'?
-    // For now, let's just implement it recursively.
-
-    match (&s.data, &dy.data) {
-        (KData::Floats(sv), KData::Floats(dv)) => {
-            let n = sv.len();
-            let mut res = Vec::with_capacity(n);
-            for i in 0..n {
-                let sig = sv[i];
-                // dSig = sig * (1 - sig)
-                let d_sig = sig * (1.0 - sig);
-                res.push(d_sig * dv[i]);
-            }
-            K::from_floats(res)
-        }
-        (KData::List(sr), KData::List(dr)) => {
-            let new_rows = sr
-                .iter()
-                .zip(dr.iter())
-                .map(|(s_row, d_row)| {
-                    // We need to pass original x, but we already computed s=sigmoid(x).
-                    // So we need a helper that takes s, dy.
-                    // But the signature is (x, dy).
-                    // Wait, if I use s here, I am recursing incorrectly if I call sigmoid_backward again.
-                    // I should make a helper 'sigmoid_backward_from_output(s, dy)'.
-                    // But to keep signature 'sigmoid_backward(x, dy)', I must recompute s inside.
-                    // Actually, 's' is already computed at top level.
-                    // If I recurse `sigmoid_backward`, it will recompute sig(x). That's fine.
-                    sigmoid_backward_inner(s_row, d_row)
-                })
-                .collect();
-            K::from_list(new_rows)
-        }
-        _ => panic!("sigmoid_backward: shape mismatch"),
-    }
+    sigmoid_backward_inner(&s, dy)
 }
 
 // Helper to avoid re-computing sigmoid(sigmoid(x))
 fn sigmoid_backward_inner(s: &K, dy: &K) -> K {
     match (&s.data, &dy.data) {
         (KData::Floats(sv), KData::Floats(dv)) => {
-            let n = sv.len();
-            let mut res = Vec::with_capacity(n);
-            for i in 0..n {
-                let sig = sv[i];
-                res.push(sig * (1.0 - sig) * dv[i]);
-            }
+            let res = parallel::binary_f64(sv, dv, s.n, dy.n, s.n, |sig, d| sig * (1.0 - sig) * d);
             K::from_floats(res)
         }
         (KData::List(sr), KData::List(dr)) => {
-            let new_rows: Vec<K> = sr
-                .iter()
-                .zip(dr.iter())
-                .map(|(r1, r2)| sigmoid_backward_inner(r1, r2))
-                .collect();
-            K::from_list(new_rows)
+            K::from_list(zip_rows_parallel(sr, dr, |r1, r2| sigmoid_backward_inner(r1, r2)))
         }
         _ => panic!("sigmoid_backward_inner: mismatch"),
     }
@@ -1190,23 +1106,11 @@ pub fn tanh_backward(x: &K, dy: &K) -> K {
 fn tanh_backward_inner(t: &K, dy: &K) -> K {
     match (&t.data, &dy.data) {
         (KData::Floats(tv), KData::Floats(dv)) => {
-            let n = tv.len();
-            let mut res = Vec::with_capacity(n);
-            for i in 0..n {
-                let tah = tv[i];
-                // dt = 1 - tanh^2
-                let d_t = 1.0 - (tah * tah);
-                res.push(d_t * dv[i]);
-            }
+            let res = parallel::binary_f64(tv, dv, t.n, dy.n, t.n, |tah, d| (1.0 - tah * tah) * d);
             K::from_floats(res)
         }
         (KData::List(tr), KData::List(dr)) => {
-            let new_rows: Vec<K> = tr
-                .iter()
-                .zip(dr.iter())
-                .map(|(r1, r2)| tanh_backward_inner(r1, r2))
-                .collect();
-            K::from_list(new_rows)
+            K::from_list(zip_rows_parallel(tr, dr, |r1, r2| tanh_backward_inner(r1, r2)))
         }
         _ => panic!("tanh_backward: mismatch"),
     }
@@ -1218,6 +1122,70 @@ fn tanh_backward_inner(t: &K, dy: &K) -> K {
 // ===================================================================
 // Monadic Verbs (Single argument)
 // ===================================================================
+
+pub fn first(x: &K) -> K {
+    if x.t < 0 {
+        return x.clone();
+    }
+    match &x.data {
+        KData::Ints(v) => {
+            if v.is_empty() {
+                K::ki(0)
+            } else {
+                K::ki(v[0])
+            }
+        }
+        KData::Floats(v) => {
+            if v.is_empty() {
+                K::kf(0.0)
+            } else {
+                K::kf(v[0])
+            }
+        }
+        KData::List(v) => {
+            if v.is_empty() {
+                x.clone()
+            } else {
+                v[0].clone()
+            }
+        }
+    }
+}
+
+pub fn reverse(x: &K) -> K {
+    if x.t < 0 {
+        return x.clone();
+    }
+    match &x.data {
+        KData::Ints(v) => {
+            let mut rev = v.clone();
+            rev.reverse();
+            K {
+                t: x.t,
+                n: x.n,
+                data: KData::Ints(rev),
+            }
+        }
+        KData::Floats(v) => {
+            let mut rev = v.clone();
+            rev.reverse();
+            K {
+                t: x.t,
+                n: x.n,
+                data: KData::Floats(rev),
+            }
+        }
+        KData::List(v) => {
+            let mut rev = v.clone();
+            rev.reverse();
+            K {
+                t: x.t,
+                n: x.n,
+                data: KData::List(rev),
+            }
+        }
+    }
+}
 
 pub fn ln(x: &K) -> K {
     match x.t.abs() {
@@ -1447,6 +1415,9 @@ pub fn find(a: &K, b: &K) -> K {
     match (&a.data, &b.data) {
         // Float array, find a float — DO(an, if(!FC(kF(a)[i],*kF(b)))R Ki(i))
         (KData::Floats(af), KData::Floats(bf)) => {
+            if bf.is_empty() {
+                return K::ki(af.len() as i64);
+            }
             let target = bf[0];
             for (i, &v) in af.iter().enumerate() {
                 if (v - target).abs() < 1e-15 {
@@ -1457,6 +1428,9 @@ pub fn find(a: &K, b: &K) -> K {
         }
         // Int array, find an int — DO(an, if(kI(a)[i]==*kI(b))R Ki(i))
         (KData::Ints(ai), KData::Ints(bi)) => {
+            if bi.is_empty() {
+                return K::ki(ai.len() as i64);
+            }
             let target = bi[0];
             for (i, &v) in ai.iter().enumerate() {
                 if v == target {
@@ -1581,3 +1555,1120 @@ pub fn find_all(a: &K, b: &K) -> K {
         _ => panic!("find_all: expected matching vector types"),
     }
 }
+
+// ===================================================================
+// grade_up() and grade_down() — monadic < and >
+// ===================================================================
+
+fn cmp_floats_ascending(a: f64, b: f64) -> std::cmp::Ordering {
+    match (a.is_nan(), b.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater, // NaN goes to the end
+        (false, true) => std::cmp::Ordering::Less,
+        (false, false) => a.total_cmp(&b),
+    }
+}
+
+fn cmp_floats_descending(a: f64, b: f64) -> std::cmp::Ordering {
+    match (a.is_nan(), b.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater, // NaN goes to the end
+        (false, true) => std::cmp::Ordering::Less,
+        (false, false) => b.total_cmp(&a),            // Reverse order for non-NaN
+    }
+}
+
+fn compare_k(a: &K, b: &K) -> std::cmp::Ordering {
+    match (&a.data, &b.data) {
+        (KData::Ints(av), KData::Ints(bv)) => {
+            for (x, y) in av.iter().zip(bv.iter()) {
+                match x.cmp(y) {
+                    std::cmp::Ordering::Equal => continue,
+                    other => return other,
+                }
+            }
+            av.len().cmp(&bv.len())
+        }
+        (KData::Floats(av), KData::Floats(bv)) => {
+            for (&x, &y) in av.iter().zip(bv.iter()) {
+                match cmp_floats_ascending(x, y) {
+                    std::cmp::Ordering::Equal => continue,
+                    other => return other,
+                }
+            }
+            av.len().cmp(&bv.len())
+        }
+        (KData::List(av), KData::List(bv)) => {
+            for (x, y) in av.iter().zip(bv.iter()) {
+                match compare_k(x, y) {
+                    std::cmp::Ordering::Equal => continue,
+                    other => return other,
+                }
+            }
+            av.len().cmp(&bv.len())
+        }
+        _ => a.t.cmp(&b.t),
+    }
+}
+
+fn compare_k_descending(a: &K, b: &K) -> std::cmp::Ordering {
+    match (&a.data, &b.data) {
+        (KData::Ints(av), KData::Ints(bv)) => {
+            for (x, y) in av.iter().zip(bv.iter()) {
+                match y.cmp(x) {
+                    std::cmp::Ordering::Equal => continue,
+                    other => return other,
+                }
+            }
+            bv.len().cmp(&av.len())
+        }
+        (KData::Floats(av), KData::Floats(bv)) => {
+            for (&x, &y) in av.iter().zip(bv.iter()) {
+                match cmp_floats_descending(x, y) {
+                    std::cmp::Ordering::Equal => continue,
+                    other => return other,
+                }
+            }
+            bv.len().cmp(&av.len())
+        }
+        (KData::List(av), KData::List(bv)) => {
+            for (x, y) in av.iter().zip(bv.iter()) {
+                match compare_k_descending(x, y) {
+                    std::cmp::Ordering::Equal => continue,
+                    other => return other,
+                }
+            }
+            bv.len().cmp(&av.len())
+        }
+        _ => b.t.cmp(&a.t),
+    }
+}
+
+/// Monadic < (grade up): returns indices that sort x ascending.
+pub fn grade_up(x: &K) -> K {
+    match &x.data {
+        KData::Ints(v) => {
+            let mut indices: Vec<i64> = (0..v.len() as i64).collect();
+            indices.sort_by(|&i, &j| v[i as usize].cmp(&v[j as usize]));
+            K::from_ints(indices)
+        }
+        KData::Floats(v) => {
+            let mut indices: Vec<i64> = (0..v.len() as i64).collect();
+            indices.sort_by(|&i, &j| cmp_floats_ascending(v[i as usize], v[j as usize]));
+            K::from_ints(indices)
+        }
+        KData::List(v) => {
+            let mut indices: Vec<i64> = (0..v.len() as i64).collect();
+            indices.sort_by(|&i, &j| compare_k(&v[i as usize], &v[j as usize]));
+            K::from_ints(indices)
+        }
+    }
+}
+
+/// Monadic > (grade down): returns indices that sort x descending.
+pub fn grade_down(x: &K) -> K {
+    match &x.data {
+        KData::Ints(v) => {
+            let mut indices: Vec<i64> = (0..v.len() as i64).collect();
+            indices.sort_by(|&i, &j| v[j as usize].cmp(&v[i as usize]));
+            K::from_ints(indices)
+        }
+        KData::Floats(v) => {
+            let mut indices: Vec<i64> = (0..v.len() as i64).collect();
+            indices.sort_by(|&i, &j| cmp_floats_descending(v[i as usize], v[j as usize]));
+            K::from_ints(indices)
+        }
+        KData::List(v) => {
+            let mut indices: Vec<i64> = (0..v.len() as i64).collect();
+            indices.sort_by(|&i, &j| compare_k_descending(&v[i as usize], &v[j as usize]));
+            K::from_ints(indices)
+        }
+    }
+}
+
+// ===================================================================
+// take() — dyadic # slice portion
+// ===================================================================
+
+/// Dyadic # (take): returns first or last abs(n) elements of b, cycling.
+pub fn take(a: &K, b: &K) -> K {
+    let n = match &a.data {
+        KData::Ints(v) if v.len() == 1 => v[0],
+        KData::Floats(v) if v.len() == 1 => v[0] as i64,
+        _ => panic!("type error: take left argument must be an integer or float scalar"),
+    };
+
+    let len = n.abs() as usize;
+    let b_t = b.t;
+    let z_t = b_t.abs();
+
+    match &b.data {
+        KData::Ints(v) => {
+            if v.is_empty() {
+                if len > 0 {
+                    panic!("length error: cannot take from empty list");
+                }
+                return K {
+                    t: z_t,
+                    n: 0,
+                    data: KData::Ints(vec![]),
+                };
+            }
+            let mut z = Vec::with_capacity(len);
+            let y_len = v.len();
+            for i in 0..len {
+                let idx = if n >= 0 {
+                    i % y_len
+                } else {
+                    (y_len - (len - i) % y_len) % y_len
+                };
+                z.push(v[idx]);
+            }
+            K {
+                t: z_t,
+                n: len as i64,
+                data: KData::Ints(z),
+            }
+        }
+        KData::Floats(v) => {
+            if v.is_empty() {
+                if len > 0 {
+                    panic!("length error: cannot take from empty list");
+                }
+                return K {
+                    t: z_t,
+                    n: 0,
+                    data: KData::Floats(vec![]),
+                };
+            }
+            let mut z = Vec::with_capacity(len);
+            let y_len = v.len();
+            for i in 0..len {
+                let idx = if n >= 0 {
+                    i % y_len
+                } else {
+                    (y_len - (len - i) % y_len) % y_len
+                };
+                z.push(v[idx]);
+            }
+            K {
+                t: z_t,
+                n: len as i64,
+                data: KData::Floats(z),
+            }
+        }
+        KData::List(v) => {
+            if v.is_empty() {
+                if len > 0 {
+                    panic!("length error: cannot take from empty list");
+                }
+                return K {
+                    t: z_t,
+                    n: 0,
+                    data: KData::List(vec![]),
+                };
+            }
+            let mut z = Vec::with_capacity(len);
+            let y_len = v.len();
+            for i in 0..len {
+                let idx = if n >= 0 {
+                    i % y_len
+                } else {
+                    (y_len - (len - i) % y_len) % y_len
+                };
+                z.push(v[idx].clone());
+            }
+            K {
+                t: z_t,
+                n: len as i64,
+                data: KData::List(z),
+            }
+        }
+    }
+}
+
+/// Unique primitive: returns only unique elements in order of first appearance.
+pub fn unique(x: &K) -> K {
+    if x.t < 0 {
+        return x.clone();
+    }
+    match &x.data {
+        KData::Ints(v) => {
+            let mut seen = std::collections::HashSet::new();
+            let mut unique_v: Vec<i64> = Vec::new();
+            for &val in v {
+                if seen.insert(val) {
+                    unique_v.push(val);
+                }
+            }
+            K {
+                t: x.t,
+                n: unique_v.len() as i64,
+                data: KData::Ints(unique_v),
+            }
+        }
+        KData::Floats(v) => {
+            let mut unique_v: Vec<f64> = Vec::new();
+            for &val in v {
+                let mut found = false;
+                for &u in &unique_v {
+                    if (val.is_nan() && u.is_nan()) || (val - u).abs() < 1e-15 {
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    unique_v.push(val);
+                }
+            }
+            K {
+                t: x.t,
+                n: unique_v.len() as i64,
+                data: KData::Floats(unique_v),
+            }
+        }
+        KData::List(v) => {
+            let mut unique_v: Vec<K> = Vec::new();
+            for item in v {
+                let mut found = false;
+                for u in &unique_v {
+                    if k_match(item, u) {
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    unique_v.push(item.clone());
+                }
+            }
+            K {
+                t: x.t,
+                n: unique_v.len() as i64,
+                data: KData::List(unique_v),
+            }
+        }
+    }
+}
+
+
+// ===================================================================
+// Parallel Helper Functions
+// ===================================================================
+
+fn map_rows_parallel<F>(rows: &[K], f: F) -> Vec<K>
+where
+    F: Fn(&K) -> K + Copy + Send + Sync,
+{
+    let len = rows.len();
+    if len <= 4 {
+        return rows.iter().map(f).collect();
+    }
+
+    let num_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let chunk_size = (len + num_threads - 1) / num_threads;
+
+    std::thread::scope(|s| {
+        let mut handles = Vec::with_capacity(num_threads);
+        for chunk in rows.chunks(chunk_size) {
+            handles.push(s.spawn(move || {
+                chunk.iter().map(f).collect::<Vec<K>>()
+            }));
+        }
+        let mut final_rows = Vec::with_capacity(len);
+        for h in handles {
+            final_rows.extend(h.join().unwrap());
+        }
+        final_rows
+    })
+}
+
+fn zip_rows_parallel<F>(sr: &[K], dr: &[K], f: F) -> Vec<K>
+where
+    F: Fn(&K, &K) -> K + Copy + Send + Sync,
+{
+    let len = sr.len();
+    if len <= 4 {
+        return sr.iter().zip(dr.iter()).map(|(r1, r2)| f(r1, r2)).collect();
+    }
+
+    let num_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let chunk_size = (len + num_threads - 1) / num_threads;
+
+    std::thread::scope(|s| {
+        let mut handles = Vec::with_capacity(num_threads);
+        for (chunk_s, chunk_d) in sr.chunks(chunk_size).zip(dr.chunks(chunk_size)) {
+            handles.push(s.spawn(move || {
+                chunk_s.iter().zip(chunk_d.iter()).map(|(r1, r2)| f(r1, r2)).collect::<Vec<K>>()
+            }));
+        }
+        let mut final_rows = Vec::with_capacity(len);
+        for h in handles {
+            final_rows.extend(h.join().unwrap());
+        }
+        final_rows
+    })
+}
+
+fn map_f64_parallel<F>(v: &[f64], op: F) -> Vec<f64>
+where
+    F: Fn(f64) -> f64 + Copy + Send + Sync,
+{
+    let len = v.len();
+    let workers = parallel::worker_count(len);
+    if workers == 1 {
+        return v.iter().map(|&x| op(x)).collect();
+    }
+
+    let mut out = vec![0.0; len];
+    let chunk = len.div_ceil(workers);
+
+    std::thread::scope(|scope| {
+        let mut chunks = out.chunks_mut(chunk);
+        for i in 0..workers {
+            let start = i * chunk;
+            if let Some(out_chunk) = chunks.next() {
+                let v_slice = &v[start..start + out_chunk.len()];
+                scope.spawn(move || {
+                    for j in 0..out_chunk.len() {
+                        out_chunk[j] = op(v_slice[j]);
+                    }
+                });
+            }
+        }
+    });
+
+    out
+}
+
+fn softmax_floats_parallel(v: &[f64]) -> Vec<f64> {
+    let len = v.len();
+    let workers = parallel::worker_count(len);
+    if workers == 1 {
+        let max_val = v.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        let exps: Vec<f64> = v.iter().map(|&val| (val - max_val).exp()).collect();
+        let sum: f64 = exps.iter().sum();
+        return exps.iter().map(|&val| val / sum).collect();
+    }
+
+    let chunk = len.div_ceil(workers);
+
+    let max_val = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for start in (0..len).step_by(chunk) {
+            let end = (start + chunk).min(len);
+            let slice = &v[start..end];
+            handles.push(scope.spawn(move || {
+                slice.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b))
+            }));
+        }
+        let mut global_max = f64::NEG_INFINITY;
+        for h in handles {
+            global_max = global_max.max(h.join().unwrap());
+        }
+        global_max
+    });
+
+    let mut exps = vec![0.0; len];
+
+    let total_sum = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        let mut chunks = exps.chunks_mut(chunk);
+        for i in 0..workers {
+            let start = i * chunk;
+            if let Some(out_chunk) = chunks.next() {
+                let slice = &v[start..start + out_chunk.len()];
+                handles.push(scope.spawn(move || {
+                    let mut local_sum = 0.0;
+                    for j in 0..out_chunk.len() {
+                        let exp_val = (slice[j] - max_val).exp();
+                        out_chunk[j] = exp_val;
+                        local_sum += exp_val;
+                    }
+                    local_sum
+                }));
+            }
+        }
+        let mut global_sum = 0.0;
+        for h in handles {
+            global_sum += h.join().unwrap();
+        }
+        global_sum
+    });
+
+    std::thread::scope(|scope| {
+        let mut chunks = exps.chunks_mut(chunk);
+        for _ in 0..workers {
+            if let Some(out_chunk) = chunks.next() {
+                scope.spawn(move || {
+                    for val in out_chunk.iter_mut() {
+                        *val /= total_sum;
+                    }
+                });
+            }
+        }
+    });
+
+    exps
+}
+
+fn dot_ff_parallel(af: &[f64], bf: &[f64], an: i64, bn: i64, len: usize) -> f64 {
+    let workers = parallel::worker_count(len);
+    if workers == 1 {
+        return dot_ff_range(af, bf, an, bn, 0, len);
+    }
+
+    let chunk = len.div_ceil(workers);
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for start in (0..len).step_by(chunk) {
+            let end = (start + chunk).min(len);
+            handles.push(scope.spawn(move || {
+                dot_ff_range(af, bf, an, bn, start, end)
+            }));
+        }
+        let mut total = 0.0;
+        for h in handles {
+            total += h.join().unwrap();
+        }
+        total
+    })
+}
+
+fn dot_ff_range(af: &[f64], bf: &[f64], an: i64, bn: i64, start: usize, end: usize) -> f64 {
+    let mut sum = 0.0;
+    if an == bn {
+        let af_slice = &af[start..end];
+        let bf_slice = &bf[start..end];
+        for i in 0..af_slice.len() {
+            sum += af_slice[i] * bf_slice[i];
+        }
+    } else if an == 1 {
+        let a0 = af[0];
+        let bf_slice = &bf[start..end];
+        for i in 0..bf_slice.len() {
+            sum += a0 * bf_slice[i];
+        }
+    } else {
+        let b0 = bf[0];
+        let af_slice = &af[start..end];
+        for i in 0..af_slice.len() {
+            sum += af_slice[i] * b0;
+        }
+    }
+    sum
+}
+
+fn dot_fi_parallel(af: &[f64], bi: &[i64], an: i64, bn: i64, len: usize) -> f64 {
+    let workers = parallel::worker_count(len);
+    if workers == 1 {
+        return dot_fi_range(af, bi, an, bn, 0, len);
+    }
+
+    let chunk = len.div_ceil(workers);
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for start in (0..len).step_by(chunk) {
+            let end = (start + chunk).min(len);
+            handles.push(scope.spawn(move || {
+                dot_fi_range(af, bi, an, bn, start, end)
+            }));
+        }
+        let mut total = 0.0;
+        for h in handles {
+            total += h.join().unwrap();
+        }
+        total
+    })
+}
+
+fn dot_fi_range(af: &[f64], bi: &[i64], an: i64, bn: i64, start: usize, end: usize) -> f64 {
+    let mut sum = 0.0;
+    if an == bn {
+        let af_slice = &af[start..end];
+        let bi_slice = &bi[start..end];
+        for i in 0..af_slice.len() {
+            sum += af_slice[i] * (bi_slice[i] as f64);
+        }
+    } else if an == 1 {
+        let a0 = af[0];
+        let bi_slice = &bi[start..end];
+        for i in 0..bi_slice.len() {
+            sum += a0 * (bi_slice[i] as f64);
+        }
+    } else {
+        let b0 = bi[0] as f64;
+        let af_slice = &af[start..end];
+        for i in 0..af_slice.len() {
+            sum += af_slice[i] * b0;
+        }
+    }
+    sum
+}
+
+fn dot_if_parallel(ai: &[i64], bf: &[f64], an: i64, bn: i64, len: usize) -> f64 {
+    let workers = parallel::worker_count(len);
+    if workers == 1 {
+        return dot_if_range(ai, bf, an, bn, 0, len);
+    }
+
+    let chunk = len.div_ceil(workers);
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for start in (0..len).step_by(chunk) {
+            let end = (start + chunk).min(len);
+            handles.push(scope.spawn(move || {
+                dot_if_range(ai, bf, an, bn, start, end)
+            }));
+        }
+        let mut total = 0.0;
+        for h in handles {
+            total += h.join().unwrap();
+        }
+        total
+    })
+}
+
+fn dot_if_range(ai: &[i64], bf: &[f64], an: i64, bn: i64, start: usize, end: usize) -> f64 {
+    let mut sum = 0.0;
+    if an == bn {
+        let ai_slice = &ai[start..end];
+        let bf_slice = &bf[start..end];
+        for i in 0..ai_slice.len() {
+            sum += (ai_slice[i] as f64) * bf_slice[i];
+        }
+    } else if an == 1 {
+        let a0 = ai[0] as f64;
+        let bf_slice = &bf[start..end];
+        for i in 0..bf_slice.len() {
+            sum += a0 * bf_slice[i];
+        }
+    } else {
+        let b0 = bf[0];
+        let ai_slice = &ai[start..end];
+        for i in 0..ai_slice.len() {
+            sum += (ai_slice[i] as f64) * b0;
+        }
+    }
+    sum
+}
+
+fn dot_ii_parallel(ai: &[i64], bi: &[i64], an: i64, bn: i64, len: usize) -> i64 {
+    let workers = parallel::worker_count(len);
+    if workers == 1 {
+        return dot_ii_range(ai, bi, an, bn, 0, len);
+    }
+
+    let chunk = len.div_ceil(workers);
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for start in (0..len).step_by(chunk) {
+            let end = (start + chunk).min(len);
+            handles.push(scope.spawn(move || {
+                dot_ii_range(ai, bi, an, bn, start, end)
+            }));
+        }
+        let mut total = 0;
+        for h in handles {
+            total += h.join().unwrap();
+        }
+        total
+    })
+}
+
+fn dot_ii_range(ai: &[i64], bi: &[i64], an: i64, bn: i64, start: usize, end: usize) -> i64 {
+    let mut sum = 0;
+    if an == bn {
+        let ai_slice = &ai[start..end];
+        let bi_slice = &bi[start..end];
+        for i in 0..ai_slice.len() {
+            sum += ai_slice[i] * bi_slice[i];
+        }
+    } else if an == 1 {
+        let a0 = ai[0];
+        let bi_slice = &bi[start..end];
+        for i in 0..bi_slice.len() {
+            sum += a0 * bi_slice[i];
+        }
+    } else {
+        let b0 = bi[0];
+        let ai_slice = &ai[start..end];
+        for i in 0..ai_slice.len() {
+            sum += ai_slice[i] * b0;
+        }
+    }
+    sum
+}
+
+fn simplify_list(v: Vec<K>) -> K {
+    if v.is_empty() {
+        return K::from_list(v);
+    }
+    let first_t = v[0].t;
+    if first_t == -1 {
+        if v.iter().all(|item| item.t == -1) {
+            let ints = v.iter().map(|item| item.ki_data()[0]).collect();
+            return K::from_ints(ints);
+        }
+    } else if first_t == -2 {
+        if v.iter().all(|item| item.t == -2) {
+            let floats = v.iter().map(|item| item.kf_data()[0]).collect();
+            return K::from_floats(floats);
+        }
+    }
+    K::from_list(v)
+}
+
+pub fn over(f: impl Fn(&K, &K) -> K, init: Option<&K>, x: &K) -> K {
+    if x.t < 0 {
+        match init {
+            Some(y) => return f(y, x),
+            None => return x.clone(),
+        }
+    }
+    match &x.data {
+        KData::Ints(v) => {
+            match init {
+                Some(y) => {
+                    let mut acc = y.clone();
+                    for &val in v {
+                        acc = f(&acc, &K::ki(val));
+                    }
+                    acc
+                }
+                None => {
+                    if v.is_empty() {
+                        panic!("length error: over with no initial value expects a non-empty list");
+                    }
+                    let mut acc = K::ki(v[0]);
+                    for &val in &v[1..] {
+                        acc = f(&acc, &K::ki(val));
+                    }
+                    acc
+                }
+            }
+        }
+        KData::Floats(v) => {
+            match init {
+                Some(y) => {
+                    let mut acc = y.clone();
+                    for &val in v {
+                        acc = f(&acc, &K::kf(val));
+                    }
+                    acc
+                }
+                None => {
+                    if v.is_empty() {
+                        panic!("length error: over with no initial value expects a non-empty list");
+                    }
+                    let mut acc = K::kf(v[0]);
+                    for &val in &v[1..] {
+                        acc = f(&acc, &K::kf(val));
+                    }
+                    acc
+                }
+            }
+        }
+        KData::List(v) => {
+            match init {
+                Some(y) => {
+                    let mut acc = y.clone();
+                    for item in v {
+                        acc = f(&acc, item);
+                    }
+                    acc
+                }
+                None => {
+                    if v.is_empty() {
+                        panic!("length error: over with no initial value expects a non-empty list");
+                    }
+                    let mut acc = v[0].clone();
+                    for item in &v[1..] {
+                        acc = f(&acc, item);
+                    }
+                    acc
+                }
+            }
+        }
+    }
+}
+
+pub fn scan(f: impl Fn(&K, &K) -> K, init: Option<&K>, x: &K) -> K {
+    if x.t < 0 {
+        match init {
+            Some(y) => return f(y, x),
+            None => return x.clone(),
+        }
+    }
+    match &x.data {
+        KData::Ints(v) => {
+            match init {
+                Some(y) => {
+                    let mut results = Vec::with_capacity(v.len());
+                    let mut acc = y.clone();
+                    for &val in v {
+                        acc = f(&acc, &K::ki(val));
+                        results.push(acc.clone());
+                    }
+                    simplify_list(results)
+                }
+                None => {
+                    if v.is_empty() {
+                        panic!("length error: scan with no initial value expects a non-empty list");
+                    }
+                    let mut results = Vec::with_capacity(v.len());
+                    let mut acc = K::ki(v[0]);
+                    results.push(acc.clone());
+                    for &val in &v[1..] {
+                        acc = f(&acc, &K::ki(val));
+                        results.push(acc.clone());
+                    }
+                    simplify_list(results)
+                }
+            }
+        }
+        KData::Floats(v) => {
+            match init {
+                Some(y) => {
+                    let mut results = Vec::with_capacity(v.len());
+                    let mut acc = y.clone();
+                    for &val in v {
+                        acc = f(&acc, &K::kf(val));
+                        results.push(acc.clone());
+                    }
+                    simplify_list(results)
+                }
+                None => {
+                    if v.is_empty() {
+                        panic!("length error: scan with no initial value expects a non-empty list");
+                    }
+                    let mut results = Vec::with_capacity(v.len());
+                    let mut acc = K::kf(v[0]);
+                    results.push(acc.clone());
+                    for &val in &v[1..] {
+                        acc = f(&acc, &K::kf(val));
+                        results.push(acc.clone());
+                    }
+                    simplify_list(results)
+                }
+            }
+        }
+        KData::List(v) => {
+            match init {
+                Some(y) => {
+                    let mut results = Vec::with_capacity(v.len());
+                    let mut acc = y.clone();
+                    for item in v {
+                        acc = f(&acc, item);
+                        results.push(acc.clone());
+                    }
+                    simplify_list(results)
+                }
+                None => {
+                    if v.is_empty() {
+                        panic!("length error: scan with no initial value expects a non-empty list");
+                    }
+                    let mut results = Vec::with_capacity(v.len());
+                    let mut acc = v[0].clone();
+                    results.push(acc.clone());
+                    for item in &v[1..] {
+                        acc = f(&acc, item);
+                        results.push(acc.clone());
+                    }
+                    simplify_list(results)
+                }
+            }
+        }
+    }
+}
+
+pub fn each(f: impl Fn(&K) -> K, x: &K) -> K {
+    if x.t < 0 {
+        return f(x);
+    }
+    match &x.data {
+        KData::Ints(v) => {
+            let res: Vec<K> = v.iter().map(|&val| f(&K::ki(val))).collect();
+            simplify_list(res)
+        }
+        KData::Floats(v) => {
+            let res: Vec<K> = v.iter().map(|&val| f(&K::kf(val))).collect();
+            simplify_list(res)
+        }
+        KData::List(v) => {
+            let res: Vec<K> = v.iter().map(|item| f(item)).collect();
+            simplify_list(res)
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub fn _2m(x: &K) -> K {
+    if x.t != -1 {
+        panic!("type error: monadic 2: expects integer function ID");
+    }
+    let fno = x.ki_data()[0];
+    let valence = match fno {
+        101 | 102 | 103 | 105 => 1,
+        104 => 2,
+        _ => 1, // Default valence
+    };
+    K::from_list(vec![x.clone(), K::ki(valence)])
+}
+
+#[allow(dead_code)]
+pub fn _2d(a: &K, b: &K) -> K {
+    let fno = match a.t {
+        -1 => a.ki_data()[0],
+        0 => {
+            let items = a.kk_data();
+            if items.is_empty() || items[0].t != -1 {
+                panic!("type error: expected integer function ID in projection");
+            }
+            items[0].ki_data()[0]
+        }
+        _ => panic!("type error: dyadic 2: expects integer function ID or projection"),
+    };
+
+    match crate::ffi::cfuncs(fno, b) {
+        Ok(res) => res,
+        Err(msg) => panic!("FFI error: {}", msg),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_unique_ints() {
+        let x = K::from_ints(vec![1, 2, 2, 3, 1, 4, 3]);
+        let res = unique(&x);
+        assert_eq!(res.t, 1);
+        assert_eq!(res.ki_data(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_unique_floats() {
+        let x = K::from_floats(vec![1.5, 2.5, 2.5000000000000001, f64::NAN, 3.5, 1.5, f64::NAN]);
+        let res = unique(&x);
+        assert_eq!(res.t, 2);
+        let fd = res.kf_data();
+        assert_eq!(fd.len(), 4);
+        assert!((fd[0] - 1.5).abs() < 1e-15);
+        assert!((fd[1] - 2.5).abs() < 1e-15);
+        assert!(fd[2].is_nan());
+        assert!((fd[3] - 3.5).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_unique_list() {
+        let x = K::from_list(vec![
+            K::from_ints(vec![1, 2]),
+            K::from_ints(vec![3, 4]),
+            K::from_ints(vec![1, 2]),
+            K::from_ints(vec![5]),
+        ]);
+        let res = unique(&x);
+        assert_eq!(res.t, 0);
+        let rd = res.kk_data();
+        assert_eq!(rd.len(), 3);
+        assert_eq!(rd[0].ki_data(), &[1, 2]);
+        assert_eq!(rd[1].ki_data(), &[3, 4]);
+        assert_eq!(rd[2].ki_data(), &[5]);
+    }
+
+    #[test]
+    fn test_unique_atoms() {
+        let x_int = K::ki(42);
+        let res_int = unique(&x_int);
+        assert_eq!(res_int.t, -1);
+        assert_eq!(res_int.ki_data(), &[42]);
+
+        let x_float = K::kf(3.14);
+        let res_float = unique(&x_float);
+        assert_eq!(res_float.t, -2);
+        assert_eq!(res_float.kf_data(), &[3.14]);
+    }
+
+    #[test]
+    fn test_first() {
+        // Int atom
+        let a = K::ki(42);
+        let res = first(&a);
+        assert_eq!(res.t, -1);
+        assert_eq!(res.ki_data(), &[42]);
+
+        // Int array
+        let b = K::from_ints(vec![10, 20, 30]);
+        let res = first(&b);
+        assert_eq!(res.t, -1);
+        assert_eq!(res.ki_data(), &[10]);
+
+        // Float array
+        let c = K::from_floats(vec![1.5, 2.5]);
+        let res = first(&c);
+        assert_eq!(res.t, -2);
+        assert_eq!(res.kf_data(), &[1.5]);
+
+        // List
+        let d = K::from_list(vec![
+            K::from_ints(vec![1, 2]),
+            K::from_ints(vec![3, 4])
+        ]);
+        let res = first(&d);
+        assert_eq!(res.t, 1);
+        assert_eq!(res.ki_data(), &[1, 2]);
+    }
+
+    #[test]
+    fn test_reverse() {
+        // Atom
+        let a = K::ki(42);
+        let res = reverse(&a);
+        assert_eq!(res.t, -1);
+        assert_eq!(res.ki_data(), &[42]);
+
+        // Int array
+        let b = K::from_ints(vec![1, 2, 3]);
+        let res = reverse(&b);
+        assert_eq!(res.t, 1);
+        assert_eq!(res.ki_data(), &[3, 2, 1]);
+
+        // Float array
+        let c = K::from_floats(vec![1.5, 2.5]);
+        let res = reverse(&c);
+        assert_eq!(res.t, 2);
+        assert_eq!(res.kf_data(), &[2.5, 1.5]);
+
+        // List
+        let d = K::from_list(vec![
+            K::from_ints(vec![1, 2]),
+            K::from_ints(vec![3, 4])
+        ]);
+        let res = reverse(&d);
+        assert_eq!(res.t, 0);
+        let rd = res.kk_data();
+        assert_eq!(rd.len(), 2);
+        assert_eq!(rd[0].ki_data(), &[3, 4]);
+        assert_eq!(rd[1].ki_data(), &[1, 2]);
+    }
+
+    #[test]
+    fn test_flip() {
+        // Int list of lists
+        let row1 = K::from_ints(vec![1, 2, 3]);
+        let row2 = K::from_ints(vec![4, 5, 6]);
+        let mat = K::from_list(vec![row1, row2]);
+        let flipped = flip(&mat);
+        assert_eq!(flipped.t, 0);
+        let rows = flipped.kk_data();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].ki_data(), &[1, 4]);
+        assert_eq!(rows[1].ki_data(), &[2, 5]);
+        assert_eq!(rows[2].ki_data(), &[3, 6]);
+    }
+
+    #[test]
+    fn test_over() {
+        let x = K::from_ints(vec![1, 2, 3]);
+        let res1 = over(plus, None, &x);
+        assert_eq!(res1.t, -1);
+        assert_eq!(res1.ki_data(), &[6]);
+
+        let res2 = over(plus, Some(&K::ki(10)), &x);
+        assert_eq!(res2.t, -1);
+        assert_eq!(res2.ki_data(), &[16]);
+
+        let x_f = K::from_floats(vec![1.0, 2.0, 3.0, 4.0]);
+        let res3 = over(times, None, &x_f);
+        assert_eq!(res3.t, -2);
+        assert!((res3.kf_data()[0] - 24.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_scan() {
+        let x = K::from_ints(vec![1, 2, 3]);
+        let res1 = scan(plus, None, &x);
+        assert_eq!(res1.t, 1);
+        assert_eq!(res1.ki_data(), &[1, 3, 6]);
+
+        let res2 = scan(plus, Some(&K::ki(10)), &x);
+        assert_eq!(res2.t, 1);
+        assert_eq!(res2.ki_data(), &[11, 13, 16]);
+    }
+
+    #[test]
+    fn test_each() {
+        let x = K::from_ints(vec![1, 2, 3]);
+        let res1 = each(negate, &x);
+        assert_eq!(res1.t, 1);
+        assert_eq!(res1.ki_data(), &[-1, -2, -3]);
+
+        let x_f = K::from_floats(vec![1.0, 2.0, 4.0]);
+        let res2 = each(reciprocal, &x_f);
+        assert_eq!(res2.t, 2);
+        assert!((res2.kf_data()[0] - 1.0).abs() < 1e-15);
+        assert!((res2.kf_data()[1] - 0.5).abs() < 1e-15);
+        assert!((res2.kf_data()[2] - 0.25).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_ffi_sin_cos_log() {
+        // Test monadic _2m (projection)
+        let fno = K::ki(101);
+        let proj = _2m(&fno);
+        assert_eq!(proj.t, 0);
+        let p_data = proj.kk_data();
+        assert_eq!(p_data.len(), 2);
+        assert_eq!(p_data[0].ki_data()[0], 101);
+        assert_eq!(p_data[1].ki_data()[0], 1); // Valence of sin is 1
+
+        // Test dyadic _2d with sin (101) on atom
+        let res_atom = _2d(&fno, &K::kf(0.0));
+        assert_eq!(res_atom.t, -2);
+        assert!((res_atom.kf_data()[0] - 0.0).abs() < 1e-15);
+
+        // Test dyadic _2d with sin on array
+        let x_arr = K::from_floats(vec![0.0, std::f64::consts::FRAC_PI_2]);
+        let res_arr = _2d(&fno, &x_arr);
+        assert_eq!(res_arr.t, 2);
+        assert!((res_arr.kf_data()[0] - 0.0).abs() < 1e-15);
+        assert!((res_arr.kf_data()[1] - 1.0).abs() < 1e-15);
+
+        // Test cos (102) and log (103)
+        let cos_res = _2d(&K::ki(102), &K::kf(0.0));
+        assert!((cos_res.kf_data()[0] - 1.0).abs() < 1e-15);
+
+        let log_res = _2d(&K::ki(103), &K::kf(std::f64::consts::E));
+        assert!((log_res.kf_data()[0] - 1.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_ffi_add_two_sum_all() {
+        // Test add_two (104) which takes 2 arguments
+        let args = K::from_list(vec![K::ki(10), K::ki(20)]);
+        let res = _2d(&K::ki(104), &args);
+        assert_eq!(res.t, -1);
+        assert_eq!(res.ki_data()[0], 30);
+
+        // Test sum_all (105)
+        let arr = K::from_ints(vec![1, 2, 3, 4]);
+        let sum_res = _2d(&K::ki(105), &arr);
+        assert_eq!(sum_res.t, -1);
+        assert_eq!(sum_res.ki_data()[0], 10);
+    }
+
+    #[test]
+    #[should_panic(expected = "FFI error: arity error: sin expects 1 argument")]
+    fn test_ffi_failures() {
+        // Calling sin (101) with 2 arguments should fail/panic
+        let args = K::from_list(vec![K::kf(1.0), K::kf(2.0)]);
+        _2d(&K::ki(101), &args);
+    }
+}
+
+

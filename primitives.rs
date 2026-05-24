@@ -26,19 +26,19 @@ pub const PRIMITIVES: &[Primitive] = &[
         name: "/",
         valence: 0,
         c_function: "over",
-        status: PrimitiveStatus::Pending,
+        status: PrimitiveStatus::Implemented,
     },
     Primitive {
         name: "\\",
         valence: 0,
         c_function: "scan",
-        status: PrimitiveStatus::Pending,
+        status: PrimitiveStatus::Implemented,
     },
     Primitive {
         name: "'",
         valence: 0,
         c_function: "each",
-        status: PrimitiveStatus::Pending,
+        status: PrimitiveStatus::Implemented,
     },
     Primitive {
         name: "/:",
@@ -62,7 +62,7 @@ pub const PRIMITIVES: &[Primitive] = &[
         name: "+",
         valence: 1,
         c_function: "flip",
-        status: PrimitiveStatus::Pending,
+        status: PrimitiveStatus::Implemented,
     },
     Primitive {
         name: "+",
@@ -86,7 +86,7 @@ pub const PRIMITIVES: &[Primitive] = &[
         name: "*",
         valence: 1,
         c_function: "first",
-        status: PrimitiveStatus::Pending,
+        status: PrimitiveStatus::Implemented,
     },
     Primitive {
         name: "*",
@@ -110,7 +110,7 @@ pub const PRIMITIVES: &[Primitive] = &[
         name: "|",
         valence: 1,
         c_function: "reverse",
-        status: PrimitiveStatus::Pending,
+        status: PrimitiveStatus::Implemented,
     },
     Primitive {
         name: "|",
@@ -158,7 +158,7 @@ pub const PRIMITIVES: &[Primitive] = &[
         name: "<",
         valence: 1,
         c_function: "grade_up",
-        status: PrimitiveStatus::Pending,
+        status: PrimitiveStatus::Implemented,
     },
     Primitive {
         name: "<",
@@ -170,7 +170,7 @@ pub const PRIMITIVES: &[Primitive] = &[
         name: ">",
         valence: 1,
         c_function: "grade_down",
-        status: PrimitiveStatus::Pending,
+        status: PrimitiveStatus::Implemented,
     },
     Primitive {
         name: ">",
@@ -218,7 +218,7 @@ pub const PRIMITIVES: &[Primitive] = &[
         name: "?",
         valence: 1,
         c_function: "range",
-        status: PrimitiveStatus::Pending,
+        status: PrimitiveStatus::Implemented,
     },
     Primitive {
         name: "?",
@@ -260,7 +260,7 @@ pub const PRIMITIVES: &[Primitive] = &[
         name: "#",
         valence: 2,
         c_function: "take_reshape",
-        status: PrimitiveStatus::Pending,
+        status: PrimitiveStatus::Implemented,
     },
     Primitive {
         name: "$",
@@ -374,13 +374,13 @@ pub const PRIMITIVES: &[Primitive] = &[
         name: "2:",
         valence: 1,
         c_function: "_2m",
-        status: PrimitiveStatus::OutOfCore,
+        status: PrimitiveStatus::Implemented,
     },
     Primitive {
         name: "2:",
         valence: 2,
         c_function: "_2d",
-        status: PrimitiveStatus::OutOfCore,
+        status: PrimitiveStatus::Implemented,
     },
     Primitive {
         name: "3:",
